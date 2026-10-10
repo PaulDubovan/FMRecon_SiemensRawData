@@ -229,6 +229,18 @@ function [im,im_denoised] = FMrecon_acquisitionsystemv1(filename_img,filename_gr
         L2gamma = opt.L2gamma;
     end
 
+    if ~isfield(opt,'doCSreg') || isempty(opt.doCSreg)
+        doCSreg = 0;
+    else
+        doCSreg = opt.doCSreg;
+    end
+
+    if ~isfield(opt,'lamVal_CS') || isempty(opt.lamVal_CS)
+        lamVal_CS = [];
+    else
+        lamVal_CS = opt.lamVal_CS;
+    end
+
     if ~isfield(opt,'MaxwellCompfromSim') || isempty(opt.MaxwellCompfromSim)
         MaxwellCompfromSim = 0;
     else
@@ -256,6 +268,12 @@ function [im,im_denoised] = FMrecon_acquisitionsystemv1(filename_img,filename_gr
     if ~isfield(opt,'dophaseshift') || isempty(opt.dophaseshift)
         opt.dophaseshift = 0;
     end
+
+    if ~isfield(opt,'pulseq_gre') || isempty(opt.pulseq_gre)
+        pulseq_gre = 0;
+    else
+        pulseq_gre = opt.pulseq_gre;
+    end   
 
     if exist('spm_B0mapPath', 'var') && exist(spm_B0mapPath, 'file')
         if isfield(opt, 'use_spm_B0map') && ~isempty(opt.use_spm_B0map)  
@@ -434,9 +452,9 @@ function [im,im_denoised] = FMrecon_acquisitionsystemv1(filename_img,filename_gr
         disp('Loading sensitivity profiles and field maps');
     else
         if ispulseq
-            [Cgre,B0map] = rcvrsplusb0map(twix,twix_gre,noise_matrix,N);
+            [Cgre,B0map] = rcvrsplusb0map(twix,twix_gre,noise_matrix,pulseq_gre,N);
         else
-            [Cgre,B0map] = rcvrsplusb0map(twix,twix_gre,noise_matrix);
+            [Cgre,B0map] = rcvrsplusb0map(twix,twix_gre,noise_matrix,pulseq_gre);
         end    
         % Save the variables
         save(CgrePath, 'Cgre','-v7.3');
@@ -634,16 +652,56 @@ function [im,im_denoised] = FMrecon_acquisitionsystemv1(filename_img,filename_gr
         y = -flip(y);
     end    
 
+    if all(diff(twix.image.slicePos(3,:)) == 0)
+        z_shift = twix.image.slicePos(3,1);
+        z = z + z_shift;
+    elseif ~isempty(twix.hdr.Dicom.lScanRegionPositionIso)
+        z_shift = twix.hdr.Dicom.lScanRegionPositionIso;
+        z = z + z_shift;     
+    end
+
     % Skope z orientation is flipped relative to the imaging coordinate convention (provides improved results in general)
     if useskopefit
         z = -z;
     end    
 
     if ispulseq
-        % Flipping z since pulseq imaging data acquired head to foot
-        z = flip(z);  
-        %Then order z to match order in which slices were acquired
-        z = z(:,tdr_sliceorder(Nsli,1));
+        if SMS_fact == 1
+            % Flipping z since pulseq imaging data acquired head to foot
+            z = flip(z);  
+            %Then order z to match order in which slices were acquired
+            z = z(:,tdr_sliceorder(Nsli,1));
+        else
+            rec_Nz = rec_Nz*SMS_fact;
+            z = ((0:rec_Nz-1) - (rec_Nz-1)/2) * (rec_FOVz/rec_Nz);
+
+            z = flip(z);
+            z_old = z;
+
+            z = (reshape(z, [Nsli SMS_fact]))'; 
+            z =  z(:,tdr_sliceorder(Nsli,1));
+            if mod(Nsli,2) ~= 0
+                half = ceil(Nsli/2);
+                z = [z(:,half+1:end), z(:,1:half)];
+            end    
+
+            if all(diff(twix.image.slicePos(3,:)) == 0)
+                z_shift = twix.image.slicePos(3,1);
+                z = z + z_shift;
+            elseif ~isempty(twix.hdr.Dicom.lScanRegionPositionIso)
+                z_shift = twix.hdr.Dicom.lScanRegionPositionIso;
+                z = z + z_shift;     
+            end
+
+            z0 = z;
+
+            tot_sli = Nsli*SMS_fact;
+            Cgre = Cgre(:,:,:,tdr_sliceorder(tot_sli,2));
+            B0map = B0map(:,:,tdr_sliceorder(tot_sli,2));
+
+            [~, SMS_indices] = ismember(z, z_old);
+            SMS_indices = SMS_indices';
+        end    
     elseif SMS_fact == 1 && ~is3D
         % order z to match order in which slices were acquired
         z = z(:,tdr_sliceorder(Nsli,1));
@@ -662,10 +720,10 @@ function [im,im_denoised] = FMrecon_acquisitionsystemv1(filename_img,filename_gr
                     z0(1,i) = twix.image.slicePos(2,sli_index);
             end
             z(1,i) = z0(1,i);
-            if ~isempty(twix.hdr.Dicom.lScanRegionPositionIso)
-                z_shift_4SMS = twix.hdr.Dicom.lScanRegionPositionIso;
-                z(1,i) = z0(1,i) - z_shift_4SMS;
-            end               
+            % if ~isempty(twix.hdr.Dicom.lScanRegionPositionIso)
+            %     z_shift_4SMS = twix.hdr.Dicom.lScanRegionPositionIso;
+            %     z(1,i) = z0(1,i) - z_shift_4SMS;
+            % end               
             for sli_group = 2:SMS_fact
                 z(sli_group,i) = z(1,i) + (sli_group-1)*Nsli*deltaz;  
             end
@@ -872,28 +930,6 @@ function [im,im_denoised] = FMrecon_acquisitionsystemv1(filename_img,filename_gr
     end
 
     if doGNLcorr
-        if all(diff(twix.image.slicePos(1,:)) == 0)
-            x_shift = twix.image.slicePos(1,1)/1000;
-            grid.x = grid.x + x_shift;
-        elseif ~isempty(twix.hdr.Dicom.lScanRegionPositionIso)
-            x_shift = twix.hdr.Dicom.lScanRegionPositionIso/1000;
-            grid.x = grid.x + x_shift;     
-        end
-        if all(diff(twix.image.slicePos(2,:)) == 0)
-            y_shift = twix.image.slicePos(2,1)/1000;
-            grid.y = grid.y + y_shift;
-        elseif ~isempty(twix.hdr.Dicom.lScanRegionPositionIso)
-            y_shift = twix.hdr.Dicom.lScanRegionPositionIso/1000;
-            grid.y = grid.z + y_shift;     
-        end
-        if all(diff(twix.image.slicePos(3,:)) == 0)
-            z_shift = twix.image.slicePos(3,1)/1000;
-            grid.z = grid.z + z_shift;
-        elseif ~isempty(twix.hdr.Dicom.lScanRegionPositionIso)
-            z_shift = twix.hdr.Dicom.lScanRegionPositionIso/1000;
-            grid.z = grid.z + z_shift;     
-        end
-
         % Switch into LAI coordinate system which appears to be the
         % appropriate system for the GNL code
         switch orient
@@ -901,19 +937,57 @@ function [im,im_denoised] = FMrecon_acquisitionsystemv1(filename_img,filename_gr
                 if ~ispulseq
                     grid.z = -grid.z;
                 end
+                if all(diff(twix.image.slicePos(1,:)) == 0)
+                    x_shift = twix.image.slicePos(1,1)/1000;
+                    grid.x = grid.x + x_shift;
+                elseif ~isempty(twix.hdr.Dicom.lScanRegionPositionIso)
+                    x_shift = twix.hdr.Dicom.lScanRegionPositionIso/1000;
+                    grid.x = grid.x + x_shift;     
+                end
+                if all(diff(twix.image.slicePos(2,:)) == 0)
+                    y_shift = twix.image.slicePos(2,1)/1000;
+                    grid.y = grid.y + y_shift;
+                elseif ~isempty(twix.hdr.Dicom.lScanRegionPositionIso)
+                    y_shift = twix.hdr.Dicom.lScanRegionPositionIso/1000;
+                    grid.y = grid.y + y_shift;     
+                end
             case 2
                 if ~ispulseq
                     grid.x = -grid.x;
+                end
+                if all(diff(twix.image.slicePos(2,:)) == 0)
+                    y_shift = twix.image.slicePos(2,1)/1000;
+                    grid.y = grid.y + y_shift;
+                elseif ~isempty(twix.hdr.Dicom.lScanRegionPositionIso)
+                    y_shift = twix.hdr.Dicom.lScanRegionPositionIso/1000;
+                    grid.y = grid.y + y_shift;     
+                end
+                if all(diff(twix.image.slicePos(3,:)) == 0)
+                    z_shift = twix.image.slicePos(3,1)/1000;
+                    grid.z = grid.z + z_shift;
+                elseif ~isempty(twix.hdr.Dicom.lScanRegionPositionIso)
+                    z_shift = twix.hdr.Dicom.lScanRegionPositionIso/1000;
+                    grid.z = grid.z + z_shift;     
                 end
             case 3
                 if ~ispulseq
                     grid.y = -grid.y;
                 end
-        end
-
-        if useskopefit
-            grid.z = -grid.z;
-        end    
+                if all(diff(twix.image.slicePos(1,:)) == 0)
+                    x_shift = twix.image.slicePos(1,1)/1000;
+                    grid.x = grid.x + x_shift;
+                elseif ~isempty(twix.hdr.Dicom.lScanRegionPositionIso)
+                    x_shift = twix.hdr.Dicom.lScanRegionPositionIso/1000;
+                    grid.x = grid.x + x_shift;     
+                end
+                if all(diff(twix.image.slicePos(3,:)) == 0)
+                    z_shift = twix.image.slicePos(3,1)/1000;
+                    grid.z = grid.z + z_shift;
+                elseif ~isempty(twix.hdr.Dicom.lScanRegionPositionIso)
+                    z_shift = twix.hdr.Dicom.lScanRegionPositionIso/1000;
+                    grid.z = grid.z + z_shift;     
+                end
+        end 
 
         grid.x = grid.x*1000;
         grid.y = grid.y*1000;
@@ -921,7 +995,7 @@ function [im,im_denoised] = FMrecon_acquisitionsystemv1(filename_img,filename_gr
 
         d = 0;
         % Supply Siemens gradient coefficient file
-        gradfile = [];  
+        gradfile = []; 
         method = 'direct';
         POLARITY = 1;
 
@@ -937,29 +1011,33 @@ function [im,im_denoised] = FMrecon_acquisitionsystemv1(filename_img,filename_gr
                 if ~ispulseq
                     grid.z = -grid.z;
                 end
+                if exist('x_shift')
+                    grid.x = grid.x - x_shift;
+                end
+                if exist('y_shift')
+                    grid.y = grid.y - y_shift;
+                end  
             case 2
                 if ~ispulseq
                     grid.x = -grid.x;
                 end
+                if exist('y_shift')
+                    grid.y = grid.y - y_shift;
+                end
+                if exist('z_shift')
+                    grid.z = grid.z - z_shift;
+                end                  
             case 3
                 if ~ispulseq
                     grid.y = -grid.y;
                 end
-        end
-
-        if useskopefit
-            grid.z = -grid.z;
-        end
-
-        if exist('x_shift')
-            grid.x = grid.x - x_shift;
-        end
-        if exist('y_shift')
-            grid.y = grid.y - y_shift;
-        end
-        if exist('z_shift')
-            grid.z = grid.z - z_shift;
-        end        
+                if exist('x_shift')
+                    grid.x = grid.x - x_shift;
+                end
+                if exist('z_shift')
+                    grid.z = grid.z - z_shift;
+                end                  
+        end     
     end
 
     % Determine maximum number of iterations based on the acquisition 
@@ -1375,45 +1453,61 @@ function [im,im_denoised] = FMrecon_acquisitionsystemv1(filename_img,filename_gr
     if doGNLcorr
         disp('Performing GNL correction')
 
-        if all(diff(twix.image.slicePos(1,:)) == 0)
-            x_shift = twix.image.slicePos(1,1)/1000;
-            grid.x = grid.x + x_shift;
-        elseif ~isempty(twix.hdr.Dicom.lScanRegionPositionIso)
-            x_shift = twix.hdr.Dicom.lScanRegionPositionIso/1000;
-            grid.x = grid.x + x_shift;     
-        end
-        if all(diff(twix.image.slicePos(2,:)) == 0)
-            y_shift = twix.image.slicePos(2,1)/1000;
-            grid.y = grid.y + y_shift;
-        elseif ~isempty(twix.hdr.Dicom.lScanRegionPositionIso)
-            y_shift = twix.hdr.Dicom.lScanRegionPositionIso/1000;
-            grid.y = grid.z + y_shift;     
-        end
-        if all(diff(twix.image.slicePos(3,:)) == 0)
-            z_shift = twix.image.slicePos(3,1)/1000;
-            grid.z = grid.z + z_shift;
-        elseif ~isempty(twix.hdr.Dicom.lScanRegionPositionIso)
-            z_shift = twix.hdr.Dicom.lScanRegionPositionIso/1000;
-            grid.z = grid.z + z_shift;     
-        end
-
         switch orient
             case 1
                 if ~ispulseq
                     grid.z = -grid.z;
                 end
+                if all(diff(twix.image.slicePos(1,:)) == 0)
+                    x_shift = twix.image.slicePos(1,1)/1000;
+                    grid.x = grid.x + x_shift;
+                elseif ~isempty(twix.hdr.Dicom.lScanRegionPositionIso)
+                    x_shift = twix.hdr.Dicom.lScanRegionPositionIso/1000;
+                    grid.x = grid.x + x_shift;     
+                end
+                if all(diff(twix.image.slicePos(2,:)) == 0)
+                    y_shift = twix.image.slicePos(2,1)/1000;
+                    grid.y = grid.y + y_shift;
+                elseif ~isempty(twix.hdr.Dicom.lScanRegionPositionIso)
+                    y_shift = twix.hdr.Dicom.lScanRegionPositionIso/1000;
+                    grid.y = grid.y + y_shift;     
+                end
             case 2
                 if ~ispulseq
                     grid.x = -grid.x;
+                end
+                if all(diff(twix.image.slicePos(2,:)) == 0)
+                    y_shift = twix.image.slicePos(2,1)/1000;
+                    grid.y = grid.y + y_shift;
+                elseif ~isempty(twix.hdr.Dicom.lScanRegionPositionIso)
+                    y_shift = twix.hdr.Dicom.lScanRegionPositionIso/1000;
+                    grid.y = grid.y + y_shift;     
+                end
+                if all(diff(twix.image.slicePos(3,:)) == 0)
+                    z_shift = twix.image.slicePos(3,1)/1000;
+                    grid.z = grid.z + z_shift;
+                elseif ~isempty(twix.hdr.Dicom.lScanRegionPositionIso)
+                    z_shift = twix.hdr.Dicom.lScanRegionPositionIso/1000;
+                    grid.z = grid.z + z_shift;     
                 end
             case 3
                 if ~ispulseq
                     grid.y = -grid.y;
                 end
-        end
-
-        if useskopefit
-            grid.z = -grid.z;
+                if all(diff(twix.image.slicePos(1,:)) == 0)
+                    x_shift = twix.image.slicePos(1,1)/1000;
+                    grid.x = grid.x + x_shift;
+                elseif ~isempty(twix.hdr.Dicom.lScanRegionPositionIso)
+                    x_shift = twix.hdr.Dicom.lScanRegionPositionIso/1000;
+                    grid.x = grid.x + x_shift;     
+                end
+                if all(diff(twix.image.slicePos(3,:)) == 0)
+                    z_shift = twix.image.slicePos(3,1)/1000;
+                    grid.z = grid.z + z_shift;
+                elseif ~isempty(twix.hdr.Dicom.lScanRegionPositionIso)
+                    z_shift = twix.hdr.Dicom.lScanRegionPositionIso/1000;
+                    grid.z = grid.z + z_shift;     
+                end
         end 
 
         switch orient
@@ -1441,7 +1535,7 @@ function [im,im_denoised] = FMrecon_acquisitionsystemv1(filename_img,filename_gr
 
         d = 0;
         % Supply Siemens gradient coefficient file
-        gradfile = []; 
+        gradfile = [];   
         method = 'direct';
         POLARITY = 1;
 
@@ -1473,29 +1567,33 @@ function [im,im_denoised] = FMrecon_acquisitionsystemv1(filename_img,filename_gr
                 if ~ispulseq
                     grid_GNL.z = -grid_GNL.z;
                 end
+                if exist('x_shift')
+                    grid_GNL.x = grid_GNL.x - x_shift;
+                end
+                if exist('y_shift')
+                    grid_GNL.y = grid_GNL.y - y_shift;
+                end 
             case 2
                 if ~ispulseq
                     grid_GNL.x = -grid_GNL.x;
                 end
+                if exist('y_shift')
+                    grid_GNL.y = grid_GNL.y - y_shift;
+                end      
+                if exist('z_shift')
+                    grid_GNL.z = grid_GNL.z - z_shift;
+                end                
             case 3
                 if ~ispulseq
                     grid_GNL.y = -grid_GNL.y;
                 end
+                if exist('x_shift')
+                    grid_GNL.x = grid_GNL.x - x_shift;
+                end
+                if exist('z_shift')
+                    grid_GNL.z = grid_GNL.z - z_shift;
+                end                 
         end
-
-        if useskopefit
-            grid_GNL.z = -grid_GNL.z;
-        end 
-
-        if exist('x_shift')
-            grid_GNL.x = grid_GNL.x - x_shift;
-        end
-        if exist('y_shift')
-            grid_GNL.y = grid_GNL.y - y_shift;
-        end
-        if exist('z_shift')
-            grid_GNL.z = grid_GNL.z - z_shift;
-        end   
     end
 
     if SMS_fact > 1 && doSMSwithkz && ~ispulseq
@@ -1653,6 +1751,36 @@ function [im,im_denoised] = FMrecon_acquisitionsystemv1(filename_img,filename_gr
                 % Iteratively solve using the conjugate gradient method
                 if doL2reg
                     [x, resSqAll, mseAll, xnormAll, xdiffAll, stopThresh, status] = cgne(opFunc,data_n(:),[],maxNit,[],L2gamma,1);
+                elseif doCSreg
+                    maxNit_CS = 800;
+                    opt.interpThresh = 0;
+                    opt.stopOnResInc = 0;
+                    opt.resThresh = 1e-6;
+
+                    ls_temp = cgne(opFunc,data_n(:),[],maxNit,opt); 
+                    ls = reshape(ls_temp,opt.imNFull);
+                    
+                    levelsPerDim = [1, 1];
+                    isDec = 0; % Non-decimated to avoid blocky edges
+                    W = dwtND(levelsPerDim,opt.imNFull,isDec);
+                
+                    wim = W*ls;
+                
+                    lambdaMethod = 0;
+                    if isempty(lamVal_CS)
+                        lamVal_CS = getLambdas(wim,lambdaMethod);
+                    end    
+                
+                    lambda_CS = waveletObj(lamVal_CS(1),wim); % This replicates the scalar lamVal into all wavelet fields using the template wim_zf
+                    lambda_CS = fillHighFreqWithLambdas(lamVal_CS,lambda_CS);
+                    lambda_CS.low = 0;
+                
+                    % Do a few cgne iterations to get a better starting guess
+                    x0 = cgne(opFunc,data_n(:),[],2); 
+                    x0 = reshape(x0,opt.imNFull); 
+
+                    cs_temp = bfista(opFunc,data_n(:),W,lambda_CS,x0(:),maxNit_CS,opt);
+                    x = gather(cs_temp);
                 else
                     [x, resSqAll, mseAll, xnormAll, xdiffAll, stopThresh, status] = cgne(opFunc,data_n(:),[],maxNit);
                 end 

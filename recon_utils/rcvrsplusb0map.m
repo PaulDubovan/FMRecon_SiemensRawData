@@ -1,4 +1,4 @@
-function [Cgre,B0map] = rcvrsplusb0map(twix,twix_gre,noise_matrix,N)
+function [Cgre,B0map] = rcvrsplusb0map(twix,twix_gre,noise_matrix,pulseq_gre,N)
 % Estimation of coil sensitivity maps and static off-resonance maps     
 % Inputs:
 %   twix:           twix of imaging data
@@ -21,8 +21,12 @@ function [Cgre,B0map] = rcvrsplusb0map(twix,twix_gre,noise_matrix,N)
     ksecond_echo = squeeze(kspace(:,:,:,:,2));
     
     %% Interpolate k-space data to match imaging resolution
-   
-    sz_preinterp = twix_gre.hdr.MeasYaps.sKSpace.lBaseResolution;
+    if ~pulseq_gre 
+        sz_preinterp = twix_gre.hdr.MeasYaps.sKSpace.lBaseResolution;
+    else    
+        sz_preinterp = twix_gre.image.NLin;
+    end
+
     if exist('N')
         sz_postinterp = N;
     else

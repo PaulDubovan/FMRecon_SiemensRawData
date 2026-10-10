@@ -121,8 +121,7 @@ isDifferentCrusher = 0;
 
 
 if isTestRun
-   Nslices = 2;
-    %Nslices = 1;
+   Nslices = 1;
    msg = 'Test run, set Nslices to 1';
    fprintf('<strong>%s</strong>\n',msg);
     warndlg(msg)

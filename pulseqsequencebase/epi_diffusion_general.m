@@ -287,8 +287,7 @@ end
 
 
 if isTestRun
-    %Nslices = 1;
-    Nslices = 2;
+    Nslices = 1;
 %     num_directions_per_b = 1;
     msg = 'Test run, set Nslices to 1';
     warndlg(msg)
