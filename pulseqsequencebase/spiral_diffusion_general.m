@@ -833,12 +833,22 @@ end
 % spi_simrf; % slice profile etc. directly copied from pulseq demos
 
 if CAIPI
-    Bandsep = [0 Nslices]- Nslices/MB;
+    if MB == 2
+        phs = [0 0];
+    elseif MB == 3
+        % optimized phase cycling for reduced peak power: https://archive.ismrm.org/2012/2209.html 
+        % Can use /utils/MBphaseoptimization.m to determine optimal phase
+        % combinations
+        phs = [0, 1.6537, 0.1676];
+    end    
+
+    Bandsep = ((0:MB-1) - (MB-1)/2) * Nslices;
+    %Bandsep = [0 Nslices]- Nslices/MB;
     nBand = 0;
-    rf_90 = mrz.makeMBPulse_less(rf90.signal,'n_bands',nBand,'timeBwProduct',4,'band_sep',Bandsep);
+    rf_90 = mrz.makeMBPulse_less(rf90.signal,'n_bands',nBand,'timeBwProduct',4,'band_sep',Bandsep, 'phs', phs);
     rf90.signal=rf_90;
 
-    rf_180 = mrz.makeMBPulse_less(rf180.signal,'n_bands',nBand,'timeBwProduct',4,'band_sep',Bandsep);
+    rf_180 = mrz.makeMBPulse_less(rf180.signal,'n_bands',nBand,'timeBwProduct',4,'band_sep',Bandsep, 'phs', phs);
     rf180.signal=rf_180;
 end
 

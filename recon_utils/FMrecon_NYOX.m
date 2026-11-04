@@ -479,9 +479,9 @@ function [im,im_denoised] = FMrecon_NYOX(filename_img,filename_gre,session_filep
         disp('Loading sensitivity profiles and field maps');
     else
         if ispulseq
-            [Cgre,B0map] = rcvrsplusb0map(twix,twix_gre,noise_matrix,pulseq_gre,N);
+            [Cgre,B0map] = rcvrsplusb0map(twix,twix_gre,noise_matrix,ispulseq,pulseq_gre,Nsli*SMS_fact,N);
         else
-            [Cgre,B0map] = rcvrsplusb0map(twix,twix_gre,noise_matrix,pulseq_gre);
+            [Cgre,B0map] = rcvrsplusb0map(twix,twix_gre,noise_matrix,ispulseq,pulseq_gre,Nsli*SMS_fact);
         end    
         % Save the variables
         save(CgrePath, 'Cgre','-v7.3');
@@ -698,6 +698,16 @@ function [im,im_denoised] = FMrecon_NYOX(filename_img,filename_gre,session_filep
             z = ((0:rec_Nz-1) - (rec_Nz-1)/2) * (rec_FOVz/rec_Nz);
 
             z = flip(z);
+            
+            % Shift NOT needed
+            % if all(diff(twix.image.slicePos(3,:)) == 0)
+            %     z_shift = twix.image.slicePos(3,1);
+            %     z = z + z_shift;
+            % elseif ~isempty(twix.hdr.Dicom.lScanRegionPositionIso)
+            %     z_shift = twix.hdr.Dicom.lScanRegionPositionIso;
+            %     z = z + z_shift;     
+            % end
+
             z_old = z;
 
             z = (reshape(z, [Nsli SMS_fact]))'; 
@@ -706,14 +716,6 @@ function [im,im_denoised] = FMrecon_NYOX(filename_img,filename_gre,session_filep
                 half = ceil(Nsli/2);
                 z = [z(:,half+1:end), z(:,1:half)];
             end    
-
-            if all(diff(twix.image.slicePos(3,:)) == 0)
-                z_shift = twix.image.slicePos(3,1);
-                z = z + z_shift;
-            elseif ~isempty(twix.hdr.Dicom.lScanRegionPositionIso)
-                z_shift = twix.hdr.Dicom.lScanRegionPositionIso;
-                z = z + z_shift;     
-            end
 
             z0 = z;
 
@@ -742,10 +744,10 @@ function [im,im_denoised] = FMrecon_NYOX(filename_img,filename_gre,session_filep
                     z0(1,i) = twix.image.slicePos(2,sli_index);
             end
             z(1,i) = z0(1,i);
-            % if ~isempty(twix.hdr.Dicom.lScanRegionPositionIso)
-            %     z_shift_4SMS = twix.hdr.Dicom.lScanRegionPositionIso;
-            %     z(1,i) = z0(1,i) - z_shift_4SMS;
-            % end               
+            if ~isempty(twix.hdr.Dicom.lScanRegionPositionIso)
+                z_shift_4SMS = twix.hdr.Dicom.lScanRegionPositionIso;
+                z(1,i) = z0(1,i) - z_shift_4SMS;
+            end               
             for sli_group = 2:SMS_fact
                 z(sli_group,i) = z(1,i) + (sli_group-1)*Nsli*deltaz;  
             end
@@ -1910,7 +1912,7 @@ function [im,im_denoised] = FMrecon_NYOX(filename_img,filename_gre,session_filep
                     maxNit_CS = 800;
                     opt.interpThresh = 0;
                     opt.stopOnResInc = 0;
-                    opt.resThresh = 1e-6;
+                    opt.resThresh = 1e-4;
 
                     ls_temp = cgne(opFunc,data_n(:),[],maxNit,opt); 
                     ls = reshape(ls_temp,opt.imNFull);
