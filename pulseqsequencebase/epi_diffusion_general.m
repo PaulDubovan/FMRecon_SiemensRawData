@@ -4,7 +4,6 @@
 
 % based on https://github.com/pulseq/pulseq/blob/master/matlab/demoSeq/writeEpiSpinEchoRS.m
 
-addpath(genpath('/path to vdspiral'))
 addpath(genpath('/path to safe_pns_prediction'))
 addpath(genpath('path to pulseq v142, modifications for v151 and up in progress'))
 addpath(genpath('FMRecon_SiemensRawData/utils'))
@@ -154,7 +153,15 @@ elseif strcmp(sys_type,'CimaX')
 elseif strcmp(sys_type,'TerraX')
     physical_slew_max = 250;
     physical_grad_max = 135.0;
+    B0=6.98;   
+elseif strcmp(sys_type,'TerraxImpulse')
+    physical_slew_max = 854.701;
+    physical_grad_max = 200;
     B0=6.98;    
+elseif strcmp(sys_type,'Impulse')
+    physical_slew_max = 854.701;
+    physical_grad_max = 200;
+    B0=6.98;     
 else
     error('Undefined')
 end
@@ -1409,9 +1416,9 @@ end
 
 %% prepare the sequence output for the scanner
 if CAIPI
-    seq.setDefinition('FOV', [fov fov sliceThickness*Nslices*MB]);
+    seq.setDefinition('FOV', [fov fov thickness*Nslices*MB]);
 else
-    seq.setDefinition('FOV', [fov fov sliceThickness*Nslices]);
+    seq.setDefinition('FOV', [fov fov thickness*Nslices]);
 end  
 seq.setDefinition('Name', 'sedebra');
 seq.setDefinition('Nx', Nx);
@@ -1596,6 +1603,8 @@ sysMap = {
     'C2_simulate_prisma','MP_GradSys_P034_c_CX600.asc'
     'CimaX',             'MP_GradSys_P034_X60.asc'
     'TerraX',            'MP_GradSys_K2298_2250V_1250A_W60_SC72CD.asc'  % PNS and forbiden frequency use differnt .asc file here
+    'TerraxImpulse',     'MP_GradSys_K2298_2250V_1250A_IX_IMPULSE_20260929.asc'  % PNS and forbidden frequency use differnt .asc file here                    
+    'Impulse',           'MP_GradSys_K2298_2250V_1250A_IX_IMPULSE_20260929.asc'  % PNS and forbidden frequency use differnt .asc file here                        
 };
 idx = strcmp(sys_type, sysMap(:,1));
 if any(idx)
@@ -1626,6 +1635,10 @@ end
 % seq.install('siemens');
 % seq.sound(); % simulate the seq's tone
 
+if strcmp(sys_type,'Impulse') 
+    sys.resonFreq(1,1) = []; sys.resonFreq(1,2) = [];
+    % add desired frequency bands            
+end  
 
 % check forbidden frequencies
 if ~isGEscanner && isTestRun

@@ -93,6 +93,11 @@ classdef sampHighOrder
                             % or SMS, but full 3D may require reduction.
         segmentedNdiv = []; % number of segments for segmented approach. 
         num3DSlc = 32;  % Number of slices required to do interpolation on 3rd dim (only for interpolated approach)
+        % Geometry handling for interpolated approach
+        inputImSize = [];   % Original input dimensions
+        permuteDims = [];  % Permutation to canonical [u,v,s] dimensions
+        inPlaneDims = [];  % Original array dimensions corresponding to u,v
+        sliceDim = [];     % Original array dimension corresponding to slice        
 	end
 
 	properties (SetAccess = protected)
@@ -103,13 +108,15 @@ classdef sampHighOrder
         b0mask = [];
         phs_spha = []; % 0th, 1st, 2nd and 3rd order spherical harmonic terms for phase over time. Must have dimensions 16 x size(sampTimes). 
         phs_conc = []; % conc grad terms for phase over time. Must have dimensions 4 x size(sampTimes). 
-        phs_grid = []; % Struct with fields phs_grid.x, phs_grid.x, phs_grid.x. Each must have dimensions equivalent to b0. MUST be in magnet frame.
+        phs_grid = []; % Struct with fields phs_grid.x, phs_grid.y, phs_grid.z. Each must have dimensions equivalent to b0. MUST be in magnet frame.
 		sampTimes = []; % sec
 		kbase = []; % spatial part of spherical harmonics that is multiplied with phs_spha or phs_conc terms
         phiDiv = []; % temporal derivative of kbase. Can be used to find global delays. See DOI: 10.1002/mrm.29460
 		traj = [];		  % Precomputed values for interpolated approach
         svdSpace = [];    % Precomputed values for interpolated approach
         svdTime = [];     % Precomputed values for interpolated approach
+        svdTimeSub = [];  % subsampled version of svdTime
+        smsPhase = [];    % Phase from CAIPI gradients used for SMS
         phsShft = [];
 		kSize = [];
 		imSize = [];
@@ -120,6 +127,7 @@ classdef sampHighOrder
         SegNpnts = [];     % Seg* variables are for segmented encoding matrix with precomputation
         SegNpntsAdj = [];
         SegPhs = [];
+        sliceNormal = [];
 	end
 
 	methods
@@ -141,6 +149,7 @@ classdef sampHighOrder
             if nargin>8 && ~isempty(approach)
                 obj.approach = approach;
             end
+            svdNtry = [];
             if nargin>9 && ~isempty(opt) 
                 if isfield(opt,'svdThresh') && ~isempty(opt.svdThresh)
                     obj.svdThresh = opt.svdThresh;
@@ -157,6 +166,15 @@ classdef sampHighOrder
                 if isfield(opt,'segmentedNdiv') && ~isempty(opt.segmentedNdiv)
                     obj.segmentedNdiv = opt.segmentedNdiv;
                 end
+                if isfield(opt,'svdNtry') && ~isempty(opt.svdNtry)
+                    svdNtry = opt.svdNtry;
+                end
+                if isfield(opt,'sliceDim') && ~isempty(opt.sliceDim)
+                    obj.sliceDim = opt.sliceDim;
+                end
+                if isfield(opt,'inPlaneDims') && ~isempty(opt.inPlaneDims)
+                    obj.inPlaneDims = opt.inPlaneDims;
+                end                
             end
             % Check inputs.
             if ~(gpuDeviceCount>0)
@@ -210,6 +228,76 @@ classdef sampHighOrder
                     end
                 end
             end
+            %% Canonicalize spatial dimensions for interpolated approach
+            if obj.approach == 1
+            
+                % Preserve original dimensions, including singleton dimensions
+                obj.inputImSize = size(phs_grid.x);
+                obj.inputImSize(end+1:3) = 1;
+            
+                % Determine slice and in-plane dimensions
+                if isempty(obj.inPlaneDims)
+            
+                    if isempty(obj.sliceDim)
+            
+                        % Infer slice dimension for single 2D slices
+                        singletonDims = find(obj.inputImSize == 1);
+            
+                        if numel(singletonDims) == 1
+                            obj.sliceDim = singletonDims;
+                        else
+                            % Default to existing axial convention
+                            obj.sliceDim = 3;
+                        end
+            
+                    end
+            
+                    obj.inPlaneDims = setdiff(1:3,obj.sliceDim,'stable');
+            
+                else
+            
+                    obj.sliceDim = setdiff(1:3,obj.inPlaneDims,'stable');
+            
+                    if numel(obj.sliceDim) ~= 1
+                        error('inPlaneDims must contain exactly two dimensions');
+                    end
+            
+                end
+            
+                if numel(obj.inPlaneDims) ~= 2 || ...
+                        numel(unique([obj.inPlaneDims,obj.sliceDim])) ~= 3
+                    error('Invalid inPlaneDims or sliceDim');
+                end
+            
+                % Canonical ordering: [u,v,s]
+                obj.permuteDims = [obj.inPlaneDims,obj.sliceDim];
+            
+                % Make all arrays explicitly 3D before permutation
+                if ~isempty(b0)
+                    b0 = reshape(b0,obj.inputImSize);
+                    b0 = permute(b0,obj.permuteDims);
+                end
+            
+                phs_grid.x = reshape(phs_grid.x,obj.inputImSize);
+                phs_grid.y = reshape(phs_grid.y,obj.inputImSize);
+                phs_grid.z = reshape(phs_grid.z,obj.inputImSize);
+            
+                if ~isempty(b0mask)
+                    b0mask = reshape(b0mask,obj.inputImSize);
+                end
+            
+                % Permute all spatially dependent arrays
+                %b0 = permute(b0,obj.permuteDims);
+            
+                phs_grid.x = permute(phs_grid.x,obj.permuteDims);
+                phs_grid.y = permute(phs_grid.y,obj.permuteDims);
+                phs_grid.z = permute(phs_grid.z,obj.permuteDims);
+            
+                if ~isempty(b0mask)
+                    b0mask = permute(b0mask,obj.permuteDims);
+                end
+            
+            end         
             obj.phs_grid = phs_grid;
 			obj.imSize = size(phs_grid.x);  
             if isempty(b0)
@@ -269,7 +357,7 @@ classdef sampHighOrder
                 case 0
                     obj.kbase = prepForDirect(obj,obj.phs_spha,obj.phs_conc,obj.sampTimes);
                 case 1
-                    [obj.svdTime,obj.svdSpace,obj.traj,obj.phsShft] = prepForInterp(obj);
+                    [obj.svdTime,obj.svdSpace,obj.traj,obj.phsShft,obj.svdTimeSub,obj.smsPhase] = prepForInterp(obj,svdNtry);
                     if obj.useGPU
                         obj.svdTime = gpuArray(obj.svdTime);
                         obj.svdSpace = gpuArray(obj.svdSpace);
@@ -308,10 +396,29 @@ classdef sampHighOrder
 		function y = useInterpWorker(obj,x)
             % Use nufft's and interpolation
             szx = [size(x), 1, 1];
+
             if obj.useGPU && ~isa(x, 'gpuArray')
                 x_a = gpuArray(x);
             else
                 x_a = x;
+            end
+            
+            %% Convert input image to canonical dimensions
+            
+            if ~obj.adjoint
+            
+                % Number of additional dimensions (e.g., coils, repetitions)
+                NRep = numel(x_a)/prod(obj.inputImSize);
+            
+                % Reshape into original spatial dimensions
+                x_a = reshape(x_a,[obj.inputImSize,NRep]);
+            
+                % Permute into [u,v,s] ordering
+                x_a = permute(x_a,[obj.permuteDims,4]);
+            
+                % Restore expected canonical dimensions
+                x_a = reshape(x_a,[obj.imSize,NRep]);
+            
             end
             nbins = size(obj.svdTime,2);
             if obj.adjoint 
@@ -319,11 +426,13 @@ classdef sampHighOrder
                 x_a = reshape(x_a, [obj.kSize, NRep]);
                 y = x_a.*conj(reshape(obj.svdTime, [obj.kSize,1,nbins])); 
                 y = conj(obj.phsShft).*y;
-                y = obj.traj'*y;
                 if (length(obj.imSize)>2) && (obj.imSize(3)>1) && (obj.imSize(3)<obj.num3DSlc)
-                    % SMS-like
-                    y = reshape(y, [obj.imSize(1:2), 1, NRep, nbins])/sqrt(2);
+                    % SMS-like. 
+                    y = reshape(y,[obj.kSize, 1, NRep, nbins]);
+                    y = y.*conj(obj.smsPhase);
+                    y = y/sqrt(size(y,2));
                 end
+                y = obj.traj'*y;
                 y = y.*conj(reshape(obj.svdSpace, [obj.imSize,1,nbins]));
                 y = sum(y,ndims(y));
                 y = reshape(y, [obj.imSize, szx(obj.NDimk+1:end)]);
@@ -334,16 +443,45 @@ classdef sampHighOrder
                 NRep = numel(x_a)/prod(obj.imSize);
                 x_a = reshape(x_a, [obj.imSize, NRep]);  
                 y = x_a.*reshape(obj.svdSpace, [obj.imSize,1,nbins]);
-                if (length(obj.imSize)>2) && (obj.imSize(3)>1) && (obj.imSize(3)<obj.num3DSlc)
-                    % SMS-like
-                    y = sum(y,3)/sqrt(2);
-                end
                 y = obj.traj*y;
+                if (length(obj.imSize)>2) && (obj.imSize(3)>1) && (obj.imSize(3)<obj.num3DSlc)
+                    % SMS-like. 
+                    y = y.*obj.smsPhase;
+                    y = sum(y,2)/sqrt(size(y,2));
+                end
                 y = obj.phsShft.*reshape(y, [obj.kSize,NRep,nbins]);
                 y = y.*reshape(obj.svdTime, [obj.kSize,1,nbins]);
                 y = sum(y,ndims(y));
                 y = reshape(y, [obj.kSize, szx(obj.NDim+1:end)]);
             end
+            %% Restore original image dimensions for adjoint
+            if obj.adjoint
+            
+                % Preserve canonical spatial dimensions, including singleton slice
+                szCanonical = obj.imSize;
+                szCanonical(end+1:3) = 1;
+            
+                % Determine number of trailing dimensions (e.g., receiver channels)
+                NRep = numel(y)/prod(szCanonical(1:3));
+            
+                % Reshape into canonical [u,v,s,NRep]
+                y = reshape(y,[szCanonical(1:3),NRep]);
+            
+                % Undo spatial permutation
+                y = ipermute(y,[obj.permuteDims,4]);
+            
+                % Restore original input dimensions
+                if obj.inputImSize(obj.sliceDim) == 1
+                    % Single-slice acquisition: collapse singleton slice dimension
+                    outSize = obj.inputImSize;
+                    outSize(obj.sliceDim) = [];
+                    y = reshape(y,[outSize,NRep]);
+                else
+                    % Multislice acquisition: preserve all three spatial dimensions
+                    y = reshape(y,[obj.inputImSize,NRep]);
+                end
+            end
+            
             if ~isa(x,'gpuArray')
                 y = gather(y);
             end
@@ -555,9 +693,9 @@ classdef sampHighOrder
                 if n>4 && ~isempty(obj.b0mask)
                     bfunc = bfunc.*b0mask_a;
                 end
-                 %phs_a = bfunc .* phs_spha_a(n,:);
-				 %phs = phs + phs_a;
-                phs = phs + bfunc .* phs_spha_a(n,:);
+                % phs_a = bfunc .* phs_spha_a(n,:);
+				% phs = phs + phs_a;
+                phs = phs + bfunc .* phs_spha_a(n,:);                
             end
             for n=1:size(phs_conc_a,1)
 				% Add all concomitant gradient terms
@@ -566,17 +704,17 @@ classdef sampHighOrder
                 if ~isempty(obj.b0mask)
                     bfunc = bfunc.*b0mask_a;
                 end
-                %phs_a = bfunc .* phs_conc_a(n,:);
-				 %phs = phs + phs_a;
-                phs = phs + bfunc .* phs_conc_a(n,:);
+                % phs_a = bfunc .* phs_conc_a(n,:);
+				% phs = phs + phs_a;
+                phs = phs + bfunc .* phs_conc_a(n,:);                
             end
             if numel(sampTimes_a)>1
                 if ~isempty(obj.b0mask)
                     b0_a = b0_a.*b0mask_a;
                 end
-                 %phs_a = b0_a.*sampTimes_a;
-                 %phs = phs + phs_a;
-                phs = phs + b0_a.*sampTimes_a;
+                % phs_a = b0_a.*sampTimes_a;
+                % phs = phs + phs_a;
+                phs = phs + b0_a.*sampTimes_a;                
             end
 			kbase = phs;
 		end
@@ -614,84 +752,89 @@ classdef sampHighOrder
             obj.ksphaDiv = ksphaDiv;
             obj.kconcDiv = kconcDiv;
         end
-		
-		function [svdTime,svdSpace,traj,phsShft] = prepForInterp(obj)
-			% Create nufft object
-            % TODO: subsampling in space should use fourier domain subsampling
-            % followed by zero filling. Should probably be paired with a
-            % mask
-            % TODO: could only compute SVD for voxels in the supplied
-            % mask. However, this might cause issues for SMS, since the kz
-            % part probably shouldn't be masked.
-			% TODO: below assumes perfectly axial slices. To do this properly, need to:
-			% 1. have normal vector to slice as an optional input
-			% 2. find linear combination of terms 2:4 in kspha for in-plane to slice
-			% 3. set that to kloc, and substract from kspha. Then can still have all kspha terms in sum below
-            sz_nufft = size(obj.phs_grid.x);
-            sz_nufft = sz_nufft(1:2); % assume 2D for now. 3D is handled later
-            sz_spha = size(obj.phs_spha);
-            kloc = zeros([2,sz_spha(2:end)], 'like', obj.phs_spha);
-            if abs(obj.phs_grid.z(2,2,1)-obj.phs_grid.z(1,1,1)) ~= 0
-                error('non-axial slices not supported for interpolated approach')
+
+        function [traj,strtIndSpha,phsShft] = createNufftForInterp(obj)
+        
+            % Create NUFFT for arbitrary slice orientations.
+            %
+            % Internal dimensions are assumed to be canonical:
+            % [in-plane dimension 1, in-plane dimension 2, slice dimension].
+            %
+            % First-order spherical harmonic coefficients are defined in
+            % physical scanner coordinates (x,y,z).
+        
+            %% NUFFT dimensions
+        
+            sz_nufft = obj.imSize(1:2);
+        
+            %% Physical voxel displacement matrix
+        
+            D = getVoxelStepMatrix(obj);
+        
+            % Physical displacement vectors along the two in-plane dimensions
+            Dplane = D(:,1:2);
+        
+            % First-order spherical harmonic coefficients [rad/m]
+            G = reshape(obj.phs_spha(2:4,:,:,:),3,[]);
+        
+            %% Convert physical gradients into NUFFT coordinates
+        
+            % Projection of physical gradients onto image dimensions.
+            %
+            % Result:
+            % [2 x Nt] = [meters/voxel]' * [rad/m]
+            %
+            % Convert rad/voxel to cycles/voxel.
+        
+            kloc = Dplane.' * G / (2*pi);
+        
+            %% Determine physical center of the image grid
+        
+            sz = size(obj.phs_grid.x);
+            sz(end+1:3) = 1;
+        
+            ctr = ceil((sz+1)/2);
+        
+            rctr = [ ...
+                obj.phs_grid.x(ctr(1),ctr(2),ctr(3)); ...
+                obj.phs_grid.y(ctr(1),ctr(2),ctr(3)); ...
+                obj.phs_grid.z(ctr(1),ctr(2),ctr(3))];
+        
+            %% Global phase associated with image center
+        
+            % The NUFFT represents spatial phase relative to its center.
+            % Therefore, account for the physical phase at the center voxel.
+        
+            phsShft = rctr.' * G;
+        
+            %% Determine which spherical harmonic terms are handled by NUFFT
+        
+            % First-order terms 2:4 are completely represented by:
+            %   - In-plane NUFFT trajectory
+            %   - Through-plane SMS phase
+        
+            strtIndSpha = 5;
+        
+            %% Complex phase modulation
+        
+            phsShft = reshape(exp(1i*phsShft),size(obj.sampTimes));
+        
+            %% Construct NUFFT
+        
+            traj = nufftOp(sz_nufft,kloc.',[],obj.useGPU);
+        
+            traj.loopDim = obj.loopDim;
+        
+        end		
+
+        function [svdTime,svdSpace,traj,phsShft,svdTimeSub,smsPhase] = prepForInterp(obj,ntry)
+            smsPhase = [];
+            if nargin<2 || isempty(ntry)
+                % Number of singular values expected
+                ntry = 30;
             end
-            if abs(obj.phs_grid.x(1,2,1)-obj.phs_grid.x(1,1,1)) > eps
-                if abs(obj.phs_grid.y(1,2,1)-obj.phs_grid.y(1,1,1)) ~= 0
-                    error('non-axial slices not supported for interpolated approach')
-                end
-                res1 = abs(obj.phs_grid.y(2,1,1)-obj.phs_grid.y(1,1,1));
-                res2 = abs(obj.phs_grid.x(1,2,1)-obj.phs_grid.x(1,1,1));
-                if obj.phs_grid.y(2,1,1)-obj.phs_grid.y(1,1,1) > 0
-                    kloc(1,:) = obj.phs_spha(3,:)/2/pi*res1;
-                else
-                    kloc(1,:) = -obj.phs_spha(3,:)/2/pi*res1;
-                end
-                if obj.phs_grid.x(1,2,1)-obj.phs_grid.x(1,1,1) > 0
-                    kloc(2,:) = obj.phs_spha(2,:)/2/pi*res2;
-                else
-                    kloc(2,:) = -obj.phs_spha(2,:)/2/pi*res2;
-                end
-                % Create phase ramp to center object domain properly, since
-                % nufft assumes isocenter is at matrix center
-                phsShft = obj.phs_grid.y(end/2+1,1,1)*obj.phs_spha(3,:) + ...
-                    obj.phs_grid.x(1,end/2+1,1)*obj.phs_spha(2,:);
-            else
-                res1 = abs(obj.phs_grid.x(2,1,1)-obj.phs_grid.x(1,1,1));
-                res2 = abs(obj.phs_grid.y(1,2,1)-obj.phs_grid.y(1,1,1));
-                if obj.phs_grid.x(2,1,1)-obj.phs_grid.x(1,1,1) > 0
-                    kloc(1,:) = obj.phs_spha(2,:)/2/pi*res1;
-                else
-                    kloc(1,:) = -obj.phs_spha(2,:)/2/pi*res1;
-                end
-                if obj.phs_grid.y(1,2,1)-obj.phs_grid.y(1,1,1) > 0
-                    kloc(2,:) = obj.phs_spha(3,:)/2/pi*res2;
-                else
-                    kloc(2,:) = -obj.phs_spha(3,:)/2/pi*res2;
-                end
-                % Create phase ramp to center object domain properly, since
-                % nufft assumes isocenter is at matrix center
-                phsShft = obj.phs_grid.x(end/2+1,1,1)*obj.phs_spha(2,:) + ...
-                    obj.phs_grid.y(1,end/2+1,1)*obj.phs_spha(3,:);
-            end
-            % Account for 3D. Note that you need enough voxels in z for
-            % kernel convolution in nufft 
-            strtIndSpha = 4;
-            if size(obj.phs_grid.x,3) >= obj.num3DSlc
-                strtIndSpha = 5;
-                res3 = abs(obj.phs_grid.z(1,1,2)-obj.phs_grid.z(1,1,1));
-                if obj.phs_grid.z(1,1,2)-obj.phs_grid.z(1,1,2) > 0
-                    kloc = cat(1, kloc,  obj.phs_spha(4,:)/2/pi*res3);
-                else
-                    kloc = cat(1, kloc, -obj.phs_spha(4,:)/2/pi*res3);
-                end
-                phsShft = phsShft + obj.phs_grid.z(1,1,end/2+1)*obj.phs_spha(4,:);
-                sz_nufft = size(obj.phs_grid.x);
-                error('3D has not been tested')
-            end
-            % Create nufft object
-            phsShft = reshape(exp(1i*phsShft), size(obj.sampTimes));
-			traj = nufftOp(sz_nufft, kloc(:,:)',[],obj.useGPU);
-            traj.loopDim = 5;
-			clear kloc
+            % Create trajectory
+		    [traj, strtIndSpha, phsShft]  = createNufftForInterp(obj);
 			%%% Determine full non-linear encoding matrix
             if obj.subFactSpc>1
                 % Subsample in space  Note that fft-based is not
@@ -739,6 +882,7 @@ classdef sampHighOrder
                             obj.b0mask = interp3(double(obj.b0mask),Xnew,Ynew,Znew) > 0.5;
                         end
                     else
+                        % SMS-like
                         [Xold,Yold] = meshgrid(1:obj.imSize(2),1:obj.imSize(1));
                         [Xnew,Ynew] = meshgrid(linspace(1,obj.imSize(2),Nvox(2)),...
                             linspace(1,obj.imSize(1),Nvox(1)));
@@ -776,6 +920,67 @@ classdef sampHighOrder
                 b = prepForDirect(obj,phs_spha_test',phs_conc_test',obj.sampTimes,[1,strtIndSpha:size(obj.phs_spha,1)]);
                 err = b_gt - b; err = mean(err.*conj(err));
             end
+            if (obj.NDim == 3) && (obj.imSize(3) <= obj.num3DSlc)
+            
+                % Multislice/SMS-like encoding.
+                % Handle through-plane first-order phase separately from NUFFT.
+            
+                %% Slice positions along physical slice normal
+            
+                D = getVoxelStepMatrix(obj);
+                
+                e1 = D(:,1)/norm(D(:,1));
+                e2 = D(:,2)/norm(D(:,2));
+                
+                normal = cross(e1,e2);
+                normal = normal/norm(normal);
+                
+                if obj.imSize(3) > 1 && gather(dot(normal,D(:,3))) < 0
+                    normal = -normal;
+                end
+            
+                ctr = ceil((obj.imSize(1:2)+1)/2);
+            
+                slicePos = zeros(obj.imSize(3),1,'like',obj.phs_grid.x);
+            
+                for ns = 1:obj.imSize(3)
+            
+                    r = [ ...
+                        obj.phs_grid.x(ctr(1),ctr(2),ns); ...
+                        obj.phs_grid.y(ctr(1),ctr(2),ns); ...
+                        obj.phs_grid.z(ctr(1),ctr(2),ns)];
+            
+                    slicePos(ns) = normal.' * r;
+            
+                end
+            
+                %% Through-plane first-order gradient
+            
+                G = reshape(obj.phs_spha(2:4,:,:,:),3,[]);
+                Gperp = normal.' * G;
+                
+                Gperp = reshape(Gperp,[1,size(obj.sampTimes)]);
+                %% Reference slice
+            
+                % Use the central slice as the reference.
+                % This avoids double-counting the phase already included in phsShft.
+            
+                refSlice = ceil((obj.imSize(3)+1)/2);
+            
+                sliceOffset = slicePos - slicePos(refSlice);
+            
+                %% Construct through-plane phase
+            
+                % Dimensions:
+                % [Nslice, size(sampTimes)]
+            
+                smsPhase = sliceOffset .* Gperp;
+                smsPhase = permute(smsPhase,[2:ndims(smsPhase),1]);
+                smsPhase = exp(1i*smsPhase);
+            
+                strtIndSpha = 5;
+            
+            end
             % Find the full encoding matrix, less the terms included in nufft
             b = prepForDirect(obj,phs_spha_in,phs_conc_in,sampTimes_in,[1,strtIndSpha:size(obj.phs_spha,1)]);
             b0mask_a = [];
@@ -793,35 +998,30 @@ classdef sampHighOrder
             % Find largest singular values and vectors. Should replace
             % below with svdsketch once it supports GPU.
             S = 1;
-            ntry = 0;
-            if obj.svdThresh < 0.055
-                delTry = 30;
-            else
-                delTry = 20;
-            end
+            tryFact = 1.2;
             subspcFact = 3;
+            %if obj.useSingle
+                b = double(b);
+            %end
             while (min(diag(S))/max(S(:)) > obj.svdThresh) 
                 if ntry > 200
                     error('many large singular values. Try providing mask or adjusting svdThresh.')
                 end
-                ntry = ntry + delTry;
-                % if obj.useSingle
-                    b = double(b);
-                % end
                 [U,S,V,FLAG] = svds(b,ntry,'largest','SubspaceDimension',subspcFact*ntry);
-                if obj.useSingle
-                    U = single(U);
-                    S = single(S);
-                    V = single(V);
-                end
                 if FLAG
                     warning('svd failure to converge. Increasing subspace.')
-                    ntry = ntry - delTry;
                     subspcFact = subspcFact+1;
                 end
+                ntry = ceil(tryFact*ntry); 
             end
             Ns = find(diag(S)/max(S(:))<obj.svdThresh,1,'first');
+            if obj.useSingle
+                U = single(U);
+                S = single(S);
+                V = single(V);
+            end
             svdTime = conj(V(:,1:Ns)*S(1:Ns,1:Ns));
+            svdTimeSub = svdTime;
             if obj.subFact > 1
                 % Fill back in values if interpolation was used
                 svdTime = reshape(svdTime, [length(inds),obj.kSize(2:end),size(svdTime,2)]);
@@ -877,6 +1077,82 @@ classdef sampHighOrder
                 erVal = erVal(:) - gather(b(:));
                 erVal = norm(erVal)/norm(b(:))
 			end
+        end
+
+        function obj = updateObj(obj,phs_spha,phs_conc,b0map,b0mask,phs_grid)
+            % Convert updated spatial arrays to canonical dimensions
+            if obj.approach == 1
+            
+                b0map = reshape(b0map,obj.inputImSize);
+                b0map = permute(b0map,obj.permuteDims);
+
+                if ~isempty(b0mask)
+                    b0mask = reshape(b0mask,obj.inputImSize);
+                    b0mask = permute(b0mask,obj.permuteDims);
+                end                
+            
+                phs_grid.x = reshape(phs_grid.x,obj.inputImSize);
+                phs_grid.y = reshape(phs_grid.y,obj.inputImSize);
+                phs_grid.z = reshape(phs_grid.z,obj.inputImSize);
+            
+                phs_grid.x = permute(phs_grid.x,obj.permuteDims);
+                phs_grid.y = permute(phs_grid.y,obj.permuteDims);
+                phs_grid.z = permute(phs_grid.z,obj.permuteDims);
+            
+            end
+
+            % Update the key parts of this object without deleting the
+            % whole thing. Useful for multislice or multivolume
+            % acquisitions
+            if obj.useSingle
+                phs_spha = single(phs_spha);
+                phs_conc = single(phs_conc);
+                b0map = single(b0map);
+                b0mask = single(b0mask);
+                phs_grid.x = single(phs_grid.x);
+				phs_grid.y = single(phs_grid.y);
+				phs_grid.z = single(phs_grid.z);
+            end
+            if obj.useGPU
+                obj.phs_spha = gpuArray(phs_spha);
+                obj.phs_conc = gpuArray(phs_conc);
+                obj.b0 = gpuArray(b0map);
+                obj.b0mask = gpuArray(b0mask);
+                obj.phs_grid.x = gpuArray(phs_grid.x);
+				obj.phs_grid.y = gpuArray(phs_grid.y);
+				obj.phs_grid.z = gpuArray(phs_grid.z);
+            else
+                obj.phs_spha = phs_spha;
+                obj.phs_conc = phs_conc;
+                obj.b0 = b0map;
+                obj.b0mask = b0mask;
+                obj.phs_grid.x = phs_grid.x;
+				obj.phs_grid.y = phs_grid.y;
+				obj.phs_grid.z = phs_grid.z;
+            end
+            switch obj.approach
+                case 1
+                    [obj.svdTime,obj.svdSpace,obj.traj,obj.phsShft,obj.svdTimeSub,obj.smsPhase] = prepForInterp(obj);
+                    %
+                    % % This uses existing svdTime to compute new svdSpace. 
+                    % % Potentially useful in multislice applications where eddy
+                    % % currents do not vary much from slice to slice, however I have
+                    % % surprisingly found that this is no faster than just doing an SVD
+                    % % in prepForInterp! Can also introduce error...
+                    % [obj.traj, strtIndSpha, obj.phsShft] = createNufftForInterp(obj);
+                    % if obj.subFactSpc>1
+                    %     error('subsample in space not coded in updateFP')
+                    % end
+                    % % Subsample in time
+                    % [phs_spha_in, phs_conc_in, sampTimes_in] = subSampTime(obj,obj.subFact);
+                    % % Find the full encoding matrix, less the terms included in nufft
+                    % b = prepForDirect(obj,phs_spha_in,phs_conc_in,sampTimes_in,[1,strtIndSpha:size(obj.phs_spha,1)]);
+                    % b = exp(1i*b);
+                    % % Find svdSpace
+                    % obj.svdSpace = b/(obj.svdTimeSub.');
+                otherwise
+                    error('this case not yet coded')
+            end
         end
         
         function [phs_spha_out, phs_conc_out, sampTimes_in, inds, phs_spha_in, phs_conc_in] = subSampTime(obj,subfact_in)
@@ -965,6 +1241,54 @@ classdef sampHighOrder
                 end
             end
         end
+
+        function D = getVoxelStepMatrix(obj)
+        
+            % Returns the physical displacement vectors corresponding to
+            % increments in each of the three canonical array dimensions.
+            %
+            % D(:,1): physical displacement along dimension 1 (u)
+            % D(:,2): physical displacement along dimension 2 (v)
+            % D(:,3): physical displacement along dimension 3 (slice)
+            %
+            % Units: meters per voxel.
+        
+            sz = size(obj.phs_grid.x);
+            sz(end+1:3) = 1;
+        
+            % Central voxel
+            ctr = ceil((sz+1)/2);
+        
+            D = zeros(3,3,'like',obj.phs_grid.x);
+        
+            for d = 1:3
+        
+                if sz(d) <= 1
+                    continue
+                end
+        
+                ind1 = ctr;
+                ind2 = ctr;
+        
+                ind1(d) = max(1,ctr(d)-1);
+                ind2(d) = min(sz(d),ctr(d)+1);
+        
+                r1 = [ ...
+                    obj.phs_grid.x(ind1(1),ind1(2),ind1(3)); ...
+                    obj.phs_grid.y(ind1(1),ind1(2),ind1(3)); ...
+                    obj.phs_grid.z(ind1(1),ind1(2),ind1(3))];
+        
+                r2 = [ ...
+                    obj.phs_grid.x(ind2(1),ind2(2),ind2(3)); ...
+                    obj.phs_grid.y(ind2(1),ind2(2),ind2(3)); ...
+                    obj.phs_grid.z(ind2(1),ind2(2),ind2(3))];
+        
+                D(:,d) = (r2-r1)/(ind2(d)-ind1(d));
+        
+            end
+        
+        end        
+
         
 	end
 end

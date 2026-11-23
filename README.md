@@ -5,7 +5,8 @@
 ### Repositories to include for Pulseq sequence development:
 Pulseq: https://github.com/pulseq/pulseq.git  \
 SafePNS: https://github.com/filip-szczepankiewicz/safe_pns_prediction  \
-VDspiral: https://web.archive.org/web/20220617183021/http://mrsrl.stanford.edu/~brian/vdspiral/
+VDspiral: https://web.archive.org/web/20220617183021/http://mrsrl.stanford.edu/~brian/vdspiral/  \
+SONIQS: https://github.com/mriphysics/SONIQS
 
 ### Repositories to include for reconstruction:
 Pulseq: https://github.com/pulseq/pulseq.git  \

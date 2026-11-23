@@ -171,10 +171,6 @@ function [im,im_denoised] = FMrecon_NYOX(filename_img,filename_gre,session_filep
         orient = opt.orient;
     end
 
-    if orient ~= 1
-        encoding_approach = 0;
-    end    
-
     if ~isfield(opt,'dob0reg') || isempty(opt.dob0reg)
         dob0reg = 1;
     else
@@ -292,7 +288,13 @@ function [im,im_denoised] = FMrecon_NYOX(filename_img,filename_gre,session_filep
         pulseq_gre = 0;
     else
         pulseq_gre = opt.pulseq_gre;
-    end    
+    end
+
+    if ~isfield(opt,'doaxisrotate') || isempty(opt.doaxisrotate)
+        doaxisrotate = 0;
+    else
+        doaxisrotate = opt.doaxisrotate;
+    end  
 
     if exist('spm_B0mapPath', 'var') && exist(spm_B0mapPath, 'file')
         if isfield(opt, 'use_spm_B0map') && ~isempty(opt.use_spm_B0map)  
@@ -954,6 +956,64 @@ function [im,im_denoised] = FMrecon_NYOX(filename_img,filename_gre,session_filep
             error('Oblique orientation not implemented')
     end
 
+    if doaxisrotate
+        slice_info = twix.hdr.MeasYaps.sSliceArray.asSlice{1};
+
+        % Extract Siemens slice normal, replacing empty fields with zero
+        fields = {'dSag', 'dCor', 'dTra'};
+        
+        n1 = zeros(3,1);
+        
+        for k = 1:3
+            if isfield(slice_info.sNormal, fields{k}) && ...
+                    ~isempty(slice_info.sNormal.(fields{k}))
+        
+                n1(k) = slice_info.sNormal.(fields{k});
+            end
+        end
+        
+        % Normalize
+        if norm(n1) == 0
+            error('Invalid slice normal: all components are empty or zero.');
+        end
+
+        % Original axial slice normal
+        n0 = [0; 0; 1];
+        
+        % Calculate rotation axis and angle
+        a = cross(n0, n1);
+        a_norm = norm(a);
+        
+        theta = atan2(a_norm, dot(n0,n1));
+        
+        if a_norm > 1e-10
+        
+            a = a / a_norm;
+        
+            % Skew-symmetric cross-product matrix
+            K = [  0,   -a(3),  a(2);
+                  a(3),   0,   -a(1);
+                 -a(2),  a(1),   0  ];
+        
+            % Rodrigues rotation matrix
+            R = eye(3)*cos(theta) + ...
+                (1-cos(theta))*(a*a') + ...
+                sin(theta)*K;
+        
+        else
+            R = eye(3);
+        end
+        
+        % Apply rotation to existing spatial grid
+        X0 = grid.x;
+        Y0 = grid.y;
+        Z0 = grid.z;
+        
+        grid.x = R(1,1)*X0 + R(1,2)*Y0 + R(1,3)*Z0;
+        grid.y = R(2,1)*X0 + R(2,2)*Y0 + R(2,3)*Z0;
+        grid.z = R(3,1)*X0 + R(3,2)*Y0 + R(3,3)*Z0;
+    end
+
     if doGNLcorr
         % Switch into LAI coordinate system which appears to be the
         % appropriate system for the GNL code
@@ -1584,7 +1644,11 @@ function [im,im_denoised] = FMrecon_NYOX(filename_img,filename_gre,session_filep
             grid.y = repmat(grid.y,1,1,1,SMS_fact);
             for i = 1:SMS_fact
                 grid.z(:,:,:,i) = repmat(reshape(z(i,:),[1,1,size(z,2)]),size(X_grid))/1000;
-            end    
+            end
+            if doaxisrotate
+                grid.x = repmat(grid.x,1,1,Nsli,SMS_fact);
+                grid.y = repmat(grid.y,1,1,Nsli,SMS_fact);
+            end            
         case 2     % sagittal
             grid.z = Z_grid/1000;
             grid.z = repmat(grid.z,1,1,1,SMS_fact);
@@ -1592,7 +1656,11 @@ function [im,im_denoised] = FMrecon_NYOX(filename_img,filename_gre,session_filep
             grid.y = repmat(grid.y,1,1,1,SMS_fact);
             for i = 1:SMS_fact
                 grid.x(:,:,:,i) = repmat(reshape(x(i,:),[1,1,size(x,2)]),size(Z_grid))/1000;
-            end   
+            end
+            if doaxisrotate
+                grid.z = repmat(grid.z,1,1,Nsli,SMS_fact);
+                grid.y = repmat(grid.y,1,1,Nsli,SMS_fact);
+            end            
         case 3     % coronal
             grid.x = X_grid/1000;
             grid.x = repmat(grid.x,1,1,1,SMS_fact);
@@ -1600,10 +1668,24 @@ function [im,im_denoised] = FMrecon_NYOX(filename_img,filename_gre,session_filep
             grid.z = repmat(grid.z,1,1,1,SMS_fact);
             for i = 1:SMS_fact
                 grid.y(:,:,:,i) = repmat(reshape(y(i,:),[1,1,size(y,2)]),size(X_grid))/1000;
-            end   
+            end
+            if doaxisrotate
+                grid.x = repmat(grid.x,1,1,Nsli,SMS_fact);
+                grid.z = repmat(grid.z,1,1,Nsli,SMS_fact);
+            end            
         otherwise
             error('Oblique orientation not implemented')
     end
+
+    if doaxisrotate
+        X0 = grid.x;
+        Y0 = grid.y;
+        Z0 = grid.z;
+        
+        grid_rotate.x = R(1,1)*X0 + R(1,2)*Y0 + R(1,3)*Z0;
+        grid_rotate.y = R(2,1)*X0 + R(2,2)*Y0 + R(2,3)*Z0;
+        grid_rotate.z = R(3,1)*X0 + R(3,2)*Y0 + R(3,3)*Z0;
+    end    
 
     grid_OG = grid;
 
@@ -1667,22 +1749,28 @@ function [im,im_denoised] = FMrecon_NYOX(filename_img,filename_gre,session_filep
                 end
         end 
 
-        switch orient
-            case 1
-                grid_GNL.x = repmat(grid.x,1,1,size(grid.z,3),1)*1000;
-                grid_GNL.y = repmat(grid.y,1,1,size(grid.z,3),1)*1000;
-                grid_GNL.z = grid.z*1000;
-            case 2
-                grid_GNL.x = grid.x*1000;
-                grid_GNL.y = repmat(grid.y,1,1,size(grid.x,3),1)*1000;
-                grid_GNL.z = repmat(grid.z,1,1,size(grid.x,3),1)*1000;
-            case 3
-                grid_GNL.x = repmat(grid.x,1,1,size(grid.y,3),1)*1000;
-                grid_GNL.y = grid.y*1000;
-                grid_GNL.z = repmat(grid.z,1,1,size(grid.y,3),1)*1000;
-            otherwise
-                error('Oblique orientation not implemented')
-        end
+        if ~doaxisrotate
+            switch orient
+                case 1
+                    grid_GNL.x = repmat(grid.x,1,1,size(grid.z,3),1)*1000;
+                    grid_GNL.y = repmat(grid.y,1,1,size(grid.z,3),1)*1000;
+                    grid_GNL.z = grid.z*1000;
+                case 2
+                    grid_GNL.x = grid.x*1000;
+                    grid_GNL.y = repmat(grid.y,1,1,size(grid.x,3),1)*1000;
+                    grid_GNL.z = repmat(grid.z,1,1,size(grid.x,3),1)*1000;
+                case 3
+                    grid_GNL.x = repmat(grid.x,1,1,size(grid.y,3),1)*1000;
+                    grid_GNL.y = grid.y*1000;
+                    grid_GNL.z = repmat(grid.z,1,1,size(grid.y,3),1)*1000;
+                otherwise
+                    error('Oblique orientation not implemented')
+            end
+        else
+            grid_GNL.x = grid.x*1000;
+            grid_GNL.y = grid.y*1000;
+            grid_GNL.z = grid.z*1000;
+        end    
 
         if SMS_fact > 1
             grid_GNL.x = grid_GNL.x(:,:,:);
@@ -1818,6 +1906,13 @@ function [im,im_denoised] = FMrecon_NYOX(filename_img,filename_gre,session_filep
                     grid.y(:,:,i) = grid_GNL.y(:,:,nslice,i);
                     grid.z(:,:,i) = grid_GNL.z(:,:,nslice,i);
                 end
+            elseif doaxisrotate
+                clear grid;
+                for i = 1:SMS_fact
+                    grid.x(:,:,i) = grid_rotate.x(:,:,nslice,i);
+                    grid.y(:,:,i) = grid_rotate.y(:,:,nslice,i);
+                    grid.z(:,:,i) = grid_rotate.z(:,:,nslice,i);
+                end            
             else
                 clear grid;
                 switch orient

@@ -74,6 +74,8 @@ isSpiralIn        = 0;
 isEsnails         = 0;
 isUseBrianVDScode = 1; % Sometimes Miki Lustig's spiral design may violate slew rate constraint, hence Brian's code is preferred
 isVds             = 0;
+isSafeSpiral = 0;
+
 if isEsnails
     isUseBrianVDScode = 0;
     isVds             = 1;
@@ -247,7 +249,15 @@ elseif strcmp(sys_type,'CimaX')
 elseif strcmp(sys_type,'TerraX')
     physical_slew_max = 250;
     physical_grad_max = 135.0;
-    B0=6.98;        
+    B0=6.98;
+elseif strcmp(sys_type,'TerraxImpulse')
+    physical_slew_max = 854.701;
+    physical_grad_max = 200;
+    B0=6.98;    
+elseif strcmp(sys_type,'Impulse')
+    physical_slew_max = 854.701;
+    physical_grad_max = 200;
+    B0=6.98;         
 else
     error('Undefined')
 end
@@ -364,12 +374,170 @@ if isUseBrianVDScode
     end
 
     disp('Calculating Gradient');
-    [k,g,s,time,r,theta] = vds(spiral_slew_safety_margin*physical_slew_max*100,spiral_grad_safety_margin*physical_grad_max/10,adcDwellSpiralDesign,Ninterleaves,Fcoeff,rmax);
+    if isSafeSpiral
+        %%% Load SAFE model from gradient coil file (Siemens)
+        if ispc
+            ascDir = 'pathto.ascfile';
+        else
+            ascDir = 'pathto.ascfile';
+        end
 
-    underSampling_factor = round( sys.gradRasterTime/adcDwellSpiralDesign );
-    k = k(1:underSampling_factor:end);
-    g = g(1:underSampling_factor:end);
-    s = s(1:underSampling_factor:end);
+        sysMap = {
+            'prisma',            'MP_GPA_K2309_2250V_951A_AS82.asc'
+            'prisma_XA30A',      'MP_GPA_K2309_2250V_951A_AS82_XA30A_mod_twoFilesCombined.asc'
+            'skyra',             'MP_GPA_K2309_2250V_793A_GC99.asc'
+            'Connectome2',       'MP_GradSys_P034_c_CX600.asc'
+            'C2_simulate_prisma','MP_GradSys_P034_c_CX600.asc'
+            'CimaX',             'MP_GradSys_P034_X60.asc'
+            'TerraX',            'MP_GradSys_K2298_2250V_1250A_W60_SC72CD.asc'  % PNS and forbidden frequency use differnt .asc file here
+            'TerraxImpulse',     'MP_GradSys_K2298_2250V_1250A_IX_IMPULSE_20260929.asc'  % PNS and forbidden frequency use differnt .asc file here                                        
+            'Impulse',           'MP_GradSys_K2298_2250V_1250A_IX_IMPULSE_20260929.asc'  % PNS and forbidden frequency use differnt .asc file here            
+        };
+        idx = strcmp(sys_type, sysMap(:,1));
+        if any(idx)
+            idx = find(idx, 1); % Get the first matching index
+            ascName = sysMap{idx, 2};
+            ascName = fullfile(ascDir, ascName);
+        else
+            error('Unknown system : %s, cannot find .asc file\n',sys_type);
+        end    
+        
+        hw = safe_hw_from_asc(ascName);
+        %hw = safe_hw_from_asc('C:\Users\david\Documents\Projects\Spiral\SAFE_PNS\MP_GradSys_K2298_2250V_1250A_W60_SC72CD.asc',1,1);
+        % Check if hardware parameters are consistent
+        safe_hw_check(hw)
+        % Check if this hw is part of the library (validate hw)
+        safe_hw_verify(hw);
+
+        sys.safeModel.tauX       = 1e-3*[hw.x.tau1, hw.x.tau2, hw.x.tau3];
+        sys.safeModel.tauY       = 1e-3*[hw.y.tau1, hw.y.tau2, hw.y.tau3];
+        sys.safeModel.tauZ       = 1e-3*[hw.z.tau1, hw.z.tau2, hw.z.tau3];
+        sys.safeModel.AX         = [hw.x.a1, hw.x.a2, hw.x.a3];
+        sys.safeModel.AY         = [hw.y.a1, hw.y.a2, hw.y.a3];
+        sys.safeModel.AZ         = [hw.z.a1, hw.z.a2, hw.z.a3];
+        sys.safeModel.pnsScaling = [hw.x.g_scale/hw.x.stim_limit, hw.y.g_scale/hw.y.stim_limit, hw.z.g_scale/hw.z.stim_limit];
+        
+        if ispc
+            ascDir = 'pathto.ascfile';
+        else
+            ascDir = 'pathto.ascfile';
+        end
+        
+        % 7T required files/info is different from the PNS files
+        sysMap = {
+            'prisma',            'MP_GPA_K2309_2250V_951A_AS82.asc'
+            'prisma_XA30A',      'MP_GPA_K2309_2250V_951A_AS82_XA30A_mod_twoFilesCombined.asc'
+            'skyra',             'MP_GPA_K2309_2250V_793A_GC99.asc'
+            'Connectome2',       'MP_GradSys_P034_c_CX600.asc'
+            'C2_simulate_prisma','MP_GradSys_P034_c_CX600.asc'
+            'CimaX',             'MP_GradSys_P034_X60.asc'
+            'TerraX',            'MP_GPA_K2298_2250V_793A_SC72CD.asc'
+            'TerraxImpulse',     'MP_GradSys_K2298_2250V_1250A_IX_IMPULSE_SAFETY.asc'            
+            'Impulse',           ''   % no .asc; resonances taken from sys.resonFreq ([f_low f_high] per row, Hz)            
+        };
+        
+        idx = strcmp(sys_type, sysMap(:,1));
+        
+        if any(idx)
+            idx = find(idx, 1); % Get the first matching index
+            ascName = sysMap{idx, 2};
+            ascName = fullfile(ascDir, ascName);
+        else
+            warning('Unknown system : %s\nSetting asc filename to []', sys_type)
+            ascName = [];
+        end
+        
+        % ascName=[]; % this disables the display of the system's resonance frequences
+        %ascName='idea/asc/MP_GPA_K2309_2250V_951A_AS82.asc'; % 3T prisma
+        % ascName='idea/asc/MP_GradSys_P034_X60.asc'; % 3T cima.X
+        
+        if endsWith(ascName, '.asc')
+            if ischar(ascName)
+                ascData=mr.Siemens.readasc(ascName);
+            end    
+    
+            if ischar(ascName)
+                for i=1:length(ascData.asGPAParameters(1).sGCParameters.aflAcousticResonanceFrequency)
+                    if ascData.asGPAParameters(1).sGCParameters.aflAcousticResonanceFrequency(i)>0
+                        sys.resonFreq(i,1) = ascData.asGPAParameters(1).sGCParameters.aflAcousticResonanceFrequency(i)-ascData.asGPAParameters(1).sGCParameters.aflAcousticResonanceBandwidth(i)/2;
+                        sys.resonFreq(i,2) = ascData.asGPAParameters(1).sGCParameters.aflAcousticResonanceFrequency(i)+ascData.asGPAParameters(1).sGCParameters.aflAcousticResonanceBandwidth(i)/2;
+    
+                    end 
+                end
+            end
+        else
+        % no .asc file: use resonance bands given in sys.resonFreq, each row = [f_low f_high] (Hz)
+            sys.resonFreq(1,1) = []; sys.resonFreq(1,2) = [];
+            % add desired frequency bands
+        end     
+        
+        sys.smax           = physical_slew_max*100;	                 % maxium slew rate [G/cm/s]
+        sys.gmax           = physical_grad_max*spiral_grad_safety_margin/10;                 % maximum gradient amplitude [G/cm]
+
+        %% Design safe spiral out
+        
+        %%% Spiral design parameters
+        pnsDesignLimit = 0.85;                   % PNS limit used for spiral design
+        NrepDesign     = 1;                      % No. of times each design is repeated (computation time estimation)
+        %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+        
+        sys4des = sys;
+
+        [k,g,s,time,r,theta] = vds(spiral_slew_safety_margin*physical_slew_max*100,spiral_grad_safety_margin*physical_grad_max/10,adcDwellSpiralDesign,Ninterleaves,Fcoeff,rmax);
+
+        % Expand forbidden bands
+        Tspiral = time(end);
+        df = 1/Tspiral;
+        % Reduce lower resonance frequency of each band
+        if df>200 
+            df = 200; %cap reduction to 200Hz (arbitrary choice)
+        end
+        sys4des.resonFreq(:,1) = sys4des.resonFreq(:,1) - round(df,-1);
+        sys4des.resonFreq(:,2) = sys4des.resonFreq(:,2) + round(df,-1);
+
+        for n=1:NrepDesign
+            tic
+            [k,g,s,time,r,theta,f,pnsSpiral] = SafeSpiralOut(sys4des,adcDwell,gradRasterTime,Ninterleaves,Fcoeff,rmax,spiral_slew_safety_margin,pnsDesignLimit);
+            tdesignSafe(n) = toc;
+        end
+        fprintf(1,'Safe spiral design took %.0fms %c %.0fms\n',1e3*mean(tdesignSafe),char(177),std(tdesignSafe))
+    else
+        [k,g,s,time,r,theta] = vds(spiral_slew_safety_margin*physical_slew_max*100,spiral_grad_safety_margin*physical_grad_max/10,adcDwellSpiralDesign,Ninterleaves,Fcoeff,rmax);
+    
+        underSampling_factor = round( sys.gradRasterTime/adcDwellSpiralDesign );
+        k = k(1:underSampling_factor:end);
+        g = g(1:underSampling_factor:end);
+        s = s(1:underSampling_factor:end);
+
+        if strcmp(sys_type,'Impulse') 
+            sys.resonFreq(1,1) = []; sys.resonFreq(1,2) = [];
+            % add desired frequency bands            
+        end     
+    end
+
+    if strcmp(sys_type,'Impulse') 
+        % Plot gradient frequency and spectrum
+        figure;
+        set(gcf,'position',[750 75 700 325],'color','w')
+        hsp(1) = subplot(2,1,1);
+        [pxx,freq] = periodogram(real(g(:)), [], 1e5, 1/gradRasterTime);   % default: no window overlap
+        [pyy,freq] = periodogram(imag(g(:)), [], 1e5, 1/gradRasterTime);   % default: no window overlap
+        plot(freq,pxx,'linewidth',1.5); hold on;
+        plot(freq,pyy,'linewidth',1.5)
+        text(0.5,1.1,'Spectrum spiral','fontweight','bold','units','normalized','HorizontalAlignment','center','fontsize',14)
+        grid on; xlim([0 2000])
+        % hsp(1).Position = [0.06 0.12 0.42 0.75];
+        ylims{1} = ylim;
+        ha(1) = gca;
+        hold on;
+        for n=1:size(sys.resonFreq,1)
+            fill([sys.resonFreq(n,1) sys.resonFreq(n,2) sys.resonFreq(n,2) sys.resonFreq(n,1)],...
+                [ylims{1}(1) ylims{1}(1) ylims{1}(2) ylims{1}(2)],'r','facealpha',0.2,'edgealpha',0)
+        end
+        hln = findobj(gca,'type','line');
+        legend(hln([2 1]),'\epsilon{}_x','\epsilon{}_y','location','northeast')
+        xlabel('Frequency (Hz)'); ylabel('Power spectral density (mT/m)^2/Hz')
+    end    
 
     disp('Plotting Gradient');
     g = [real(g(:)) imag(g(:))];
@@ -1690,6 +1858,8 @@ sysMap = {
     'C2_simulate_prisma','MP_GradSys_P034_c_CX600.asc'
     'CimaX',             'MP_GradSys_P034_X60.asc'
     'TerraX',            'MP_GradSys_K2298_2250V_1250A_W60_SC72CD.asc'  % PNS and forbiden frequency use differnt .asc file here
+    'TerraxImpulse',     'MP_GradSys_K2298_2250V_1250A_IX_IMPULSE_20260929.asc'  % PNS and forbidden frequency use differnt .asc file here                    
+    'Impulse',           'MP_GradSys_K2298_2250V_1250A_IX_IMPULSE_20260929.asc'  % PNS and forbidden frequency use differnt .asc file here                    
 };
 idx = strcmp(sys_type, sysMap(:,1));
 if any(idx)
